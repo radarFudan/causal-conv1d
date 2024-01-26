@@ -25,6 +25,10 @@ struct ConvParamsBase {
     index_t conv_state_c_stride;
     index_t conv_state_l_stride;
 
+    index_t cache_conv_state_batch_stride;
+    index_t cache_conv_state_c_stride;
+    index_t cache_conv_state_l_stride;
+
     // Common data pointers.
     void *__restrict__ x_ptr;
     void *__restrict__ weight_ptr;
@@ -32,6 +36,7 @@ struct ConvParamsBase {
     void *__restrict__ out_ptr;
 
     void *__restrict__ conv_state_ptr;
+    void *__restrict__ cache_conv_state_ptr;
 
     void *__restrict__ seq_idx_ptr;
 };
@@ -45,11 +50,15 @@ struct ConvParamsBwd: public ConvParamsBase {
     index_t dout_batch_stride;
     index_t dout_c_stride;
     index_t dout_l_stride;
+    index_t dcache_conv_state_batch_stride;
+    index_t dcache_conv_state_c_stride;
+    index_t dcache_conv_state_l_stride;
 
     // Common data pointers.
     void *__restrict__ dx_ptr;
     void *__restrict__ dweight_ptr;
     void *__restrict__ dbias_ptr;
     void *__restrict__ dout_ptr;
+    void *__restrict__ dcache_conv_state_ptr;
 };
 
