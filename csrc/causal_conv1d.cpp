@@ -145,7 +145,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     auto weight_type = weight.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
     TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::Half || weight_type == at::ScalarType::BFloat16);
-    TORCH_CHECK(conv_state.scalar_type() == input_type);
+    TORCH_CHECK(cache_conv_state.scalar_type() == input_type);
 
     TORCH_CHECK(x.is_cuda());
     TORCH_CHECK(weight.is_cuda());
