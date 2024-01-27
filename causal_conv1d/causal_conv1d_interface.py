@@ -10,33 +10,34 @@ import causal_conv1d_cuda
 class CausalConv1dFn(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, weight, bias=None, seq_idx=None, activation=None):
+    def forward(ctx, x, weight, bias=None, seq_idx=None, activation=None, cache_conv_state=None):
         if activation not in [None, "silu", "swish"]:
             raise NotImplementedError("activation must be None, silu, or swish")
         if x.stride(2) != 1 and x.stride(1) != 1:
             x = x.contiguous()
         bias = bias.contiguous() if bias is not None else None
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-        ctx.save_for_backward(x, weight, bias, seq_idx)
+        cache_conv_state = cache_conv_state.contiguous() if cache_conv_state is not None else None
+        ctx.save_for_backward(x, weight, bias, seq_idx, cache_conv_state)
         ctx.activation = activation in ["silu", "swish"]
-        out = causal_conv1d_cuda.causal_conv1d_fwd(x, weight, bias, seq_idx, ctx.activation)
+        out = causal_conv1d_cuda.causal_conv1d_fwd(x, weight, bias, seq_idx, ctx.activation, cache_conv_state=cache_conv_state)
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        x, weight, bias, seq_idx = ctx.saved_tensors
+        x, weight, bias, seq_idx, cache_conv_state = ctx.saved_tensors
         if dout.stride(2) != 1 and dout.stride(1) != 1:
             dout = dout.contiguous()
         # The kernel supports passing in a pre-allocated dx (e.g., in case we want to fuse the
         # backward of conv1d with the backward of chunk).
         # Here we just pass in None and dx will be allocated in the C++ code.
         dx, dweight, dbias = causal_conv1d_cuda.causal_conv1d_bwd(
-            x, weight, bias, dout, seq_idx, None, ctx.activation
+            x, weight, bias, dout, seq_idx, None, ctx.activation, cache_conv_state=cache_conv_state,
         )
         return dx, dweight, dbias if bias is not None else None, None, None
 
 
-def causal_conv1d_fn(x, weight, bias=None, seq_idx=None, activation=None):
+def causal_conv1d_fn(x, weight, bias=None, seq_idx=None, activation=None, cache_conv_state=None):
     """
     x: (batch, dim, seqlen)
     weight: (dim, width)
@@ -46,26 +47,47 @@ def causal_conv1d_fn(x, weight, bias=None, seq_idx=None, activation=None):
 
     out: (batch, dim, seqlen)
     """
-    return CausalConv1dFn.apply(x, weight, bias, seq_idx, activation)
+    return CausalConv1dFn.apply(x, weight, bias, seq_idx, activation, cache_conv_state=cache_conv_state)
 
 
-def causal_conv1d_ref(x, weight, bias=None, activation=None):
+def causal_conv1d_ref(x, weight, bias=None, activation=None, cache_conv_state=None):
     """
     x: (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
+    cache_conv_state: (batch, dim, width2)
 
     out: (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
+    
     dtype_in = x.dtype
-    x = x.to(weight.dtype)
     seqlen = x.shape[-1]
     dim, width = weight.shape
-    out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+    width2 = cache_conv_state.shape[-1]
+
+
+    print("In causal_conv1d_ref")
+    print("seqlen:", seqlen)
+    print("width:", width)
+    # print("width2:", width2)
+
+
+    if cache_conv_state is not None:
+        x = torch.cat([cache_conv_state, x], dim=-1) # (batch, dim, width2 + seqlen)
+        x = x.to(weight.dtype)
+        new_cache_conv_state = x[:, :, -width2:]
+    else:
+        x = x.to(weight.dtype)
+        new_cache_conv_state = None
+    
+    # out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+    out = F.conv1d(x, weight.unsqueeze(1), bias, groups=dim)
+    print("out.shape:", out.shape)
     out = out[..., :seqlen]
-    return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+
+    return (out if activation is None else F.silu(out)).to(dtype=dtype_in), new_cache_conv_state
 
 
 def causal_conv1d_update(x, conv_state, weight, bias=None, activation=None):
