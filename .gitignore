@@ -1,0 +1,5 @@
+build/
+causal_conv1d.egg-info/
+causal_conv1d/__pycache__/
+causal_conv1d_cuda.cpython-310-x86_64-linux-gnu.so
+debug.ipynb

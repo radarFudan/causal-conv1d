@@ -63,7 +63,9 @@ void set_conv_params_fwd(ConvParamsBase &params,
                          const at::Tensor weight,
                          const at::Tensor out,
                          void* bias_ptr,
-                         bool silu_activation) {
+                         bool silu_activation, 
+                         const at::Tensor cache_conv_state
+                         ) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -80,6 +82,7 @@ void set_conv_params_fwd(ConvParamsBase &params,
     params.weight_ptr = weight.data_ptr();
     params.bias_ptr = bias_ptr;
     params.out_ptr = out.data_ptr();
+    params.cache_conv_state_ptr = cache_conv_state.data_ptr();
     // All stride are in elements, not bytes.
     params.x_batch_stride = x.stride(0);
     params.x_c_stride = x.stride(1);
@@ -89,6 +92,9 @@ void set_conv_params_fwd(ConvParamsBase &params,
     params.out_batch_stride = out.stride(0);
     params.out_c_stride = out.stride(1);
     params.out_l_stride = out.stride(-1);
+    params.cache_conv_state_batch_stride = cache_conv_state.stride(0);
+    params.cache_conv_state_c_stride = cache_conv_state.stride(1);
+    params.cache_conv_state_l_stride = cache_conv_state.stride(-1);
 }
 
 
@@ -106,10 +112,12 @@ void set_conv_params_bwd(ConvParamsBwd &params,
                          const at::Tensor dx,
                          const at::Tensor dweight,
                          void* dbias_ptr,
-                         bool silu_activation) {
+                         bool silu_activation,
+                         const at::Tensor cache_conv_state
+                         ) {
     // Pass in "dout" instead of "out", we're not gonna use "out" at all.
     set_conv_params_fwd(params, batch, dim, seqlen, width,
-                        x, weight, dout, bias_ptr, silu_activation);
+                        x, weight, dout, bias_ptr, silu_activation, cache_conv_state);
 
     // Set the pointers and strides.
     params.dout_ptr = dout.data_ptr();
@@ -131,14 +139,17 @@ at::Tensor
 causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &bias_,
                   const c10::optional<at::Tensor> &seq_idx_,
-                  bool silu_activation) {
+                  bool silu_activation, 
+                  const at::Tensor &cache_conv_state) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
     TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::Half || weight_type == at::ScalarType::BFloat16);
+    // TORCH_CHECK(cache_conv_state.scalar_type() == input_type);
 
     TORCH_CHECK(x.is_cuda());
     TORCH_CHECK(weight.is_cuda());
+    TORCH_CHECK(cache_conv_state.is_cuda());
 
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
@@ -148,6 +159,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
 
     CHECK_SHAPE(x, batch_size, dim, seqlen);
     CHECK_SHAPE(weight, dim, width);
+    CHECK_SHAPE(cache_conv_state, batch_size, dim, width - 1);
 
     TORCH_CHECK(x.stride(2) == 1 || x.stride(1) == 1);
     const bool is_channel_last = x.stride(1) == 1 && x.stride(2) > 1;
@@ -179,7 +191,8 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     ConvParamsBase params;
     set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
                         bias_.has_value() ? bias_.value().data_ptr() : nullptr,
-                        silu_activation);
+                        silu_activation, cache_conv_state);
+    // TODO, here I should find a way to get the new cache_conv_state 
 
     if (seq_idx_.has_value()) {
         params.seq_idx_ptr = seq_idx_.value().data_ptr();
@@ -200,7 +213,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
             }
         });
     });
-    return out;
+    return out, cache_conv_state;
 }
 
 std::vector<at::Tensor>
@@ -209,15 +222,19 @@ causal_conv1d_bwd(const at::Tensor &x, const at::Tensor &weight,
                   at::Tensor &dout,
                   c10::optional<at::Tensor> &seq_idx_,
                   c10::optional<at::Tensor> &dx_,
-                  bool silu_activation) {
+                  bool silu_activation, 
+                  const at::Tensor &cache_conv_state
+                  ) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
     TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::Half || weight_type == at::ScalarType::BFloat16);
+    TORCH_CHECK(cache_conv_state.scalar_type() == input_type);
 
     TORCH_CHECK(x.is_cuda());
     TORCH_CHECK(weight.is_cuda());
     TORCH_CHECK(dout.is_cuda());
+    TORCH_CHECK(cache_conv_state.is_cuda());
 
     const auto sizes = x.sizes();
     const int batch_size = sizes[0];
@@ -230,6 +247,7 @@ causal_conv1d_bwd(const at::Tensor &x, const at::Tensor &weight,
     CHECK_SHAPE(x, batch_size, dim, seqlen);
     CHECK_SHAPE(weight, dim, width);
     CHECK_SHAPE(dout, batch_size, dim, seqlen);
+    CHECK_SHAPE(cache_conv_state, batch_size, dim, width-1);
 
     TORCH_CHECK(x.stride(2) == 1 || x.stride(1) == 1);
     const bool is_channel_last = x.stride(1) == 1 && x.stride(2) > 1;
@@ -277,7 +295,7 @@ causal_conv1d_bwd(const at::Tensor &x, const at::Tensor &weight,
     set_conv_params_bwd(params, batch_size, dim, seqlen, width,
                         x, weight, bias_.has_value() ? bias_.value().data_ptr() : nullptr,
                         dout, dx, dweight, bias_.has_value() ? dbias.data_ptr() : nullptr,
-                        silu_activation);
+                        silu_activation, cache_conv_state);
 
     if (seq_idx_.has_value()) {
         params.seq_idx_ptr = seq_idx_.value().data_ptr();
@@ -338,7 +356,7 @@ causal_conv1d_update(const at::Tensor &x,
     ConvParamsBase params;
     set_conv_params_fwd(params, batch_size, dim, /*seqlen=*/1, width, x, weight, out,
                         bias_.has_value() ? bias_.value().data_ptr() : nullptr,
-                        silu_activation);
+                        silu_activation, conv_state); // TODO, conv_state is not of right shape yet. 
     params.conv_state_ptr = conv_state.data_ptr();
     // All stride are in elements, not bytes.
     params.conv_state_batch_stride = conv_state.stride(0);
